@@ -1,5 +1,11 @@
 import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
+import torch.utils.data as Data
+import torchvision
+from torch.autograd import Variable
+import torch
+from torchvision.transforms import Compose, ToTensor, Resize
+from torch.utils.tensorboard import SummaryWriter
 
 
 # 预训练的参数
@@ -106,5 +112,101 @@ def resnet18(pretrained=False, **kwargs):
         model.load_state_dict(model_zoo.load_url(model_urls['resnet18']))
     return model
 
-if __name__ == "__main__":
-    print(resnet18())
+
+
+#对输入图像进行处理，转换为（224，224）,因为resnet18要求输入为（224，224），并转化为tensor
+def input_transform():
+    return Compose([
+                Resize(224),   #改变尺寸
+                ToTensor(),      #变成tensor
+                ])
+
+
+train_data = torchvision.datasets.MNIST(
+    root='./data/',    # 保存或者提取位置
+    train=True,  # this is training data
+    transform=input_transform(),    # 转换 PIL.Image or numpy.ndarray 成
+                                                    # torch.FloatTensor (C x H x W), 训练的时候 normalize 成 [0.0, 1.0] 区间
+    download=False,          # 没下载就下载, 下载了就不用再下了
+)
+
+test_data = torchvision.datasets.MNIST(
+    root='./data/',    # 保存或者提取位置
+    train=False,  # this is training data
+    transform=input_transform(),    # 转换 PIL.Image or numpy.ndarray 成
+                                                    # torch.FloatTensor (C x H x W), 训练的时候 normalize 成 [0.0, 1.0] 区间
+    download=False,          # 没下载就下载, 下载了就不用再下了
+)
+
+
+'''
+进行批处理
+'''
+train_loader = Data.DataLoader(dataset=train_data,
+                        batch_size=128,
+                        shuffle=True)
+
+test_loader = Data.DataLoader(dataset=test_data,
+                        batch_size=128,
+                        shuffle=True)
+
+net = resnet18(num_classes=10)
+optimizer = torch.optim.Adam(net.parameters(),lr=0.01)
+loss_func = torch.nn.CrossEntropyLoss()
+
+
+def train(train_x, train_y):
+    net.train()
+
+    # 前向传播
+    train_outputs = net(train_x)
+    loss = loss_func(train_outputs, train_y)
+
+    # 后向传播及梯度优化
+    # 梯度置零，不然每个batch都会叠加
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    # 计算准确率
+    _, argmax = torch.max(train_outputs, 1)
+    accuracy = (train_y == argmax.squeeze()).float().mean()
+
+    return loss.item(), accuracy.item()
+
+@torch.no_grad()
+def test():
+    net.eval()
+
+    total = 0
+    correct = 0
+    for test_x, test_y in test_loader:
+        test_outputs = net(test_x)
+        _, argmax = torch.max(test_outputs, 1)
+        correct += (test_y == argmax.squeeze()).sum().item()
+        total += test_y.size(0)
+        # 只算第一个批次不然太慢了
+        break
+    return correct / total
+
+writer = SummaryWriter()
+
+for epoch in range(2):
+    for step,(batch_x,batch_y) in enumerate(train_loader):
+        b_x = Variable(batch_x)
+        b_y = Variable(batch_y)
+
+        train_loss, train_accuracy = train(b_x, b_y)
+
+        if step % 5 == 0:
+            test_accuracy = test()
+            print('epoch:{}, step:{}, train_loss:{}, train_accuracy:{}, test_accuracy:{}'.format(epoch, step, train_loss, train_accuracy, test_accuracy))
+
+            if(step == 5):
+                writer.add_graph(net, b_x)
+
+            writer.add_scalar('Loss/train', train_loss, epoch)
+            writer.add_scalars('Accuracy', {"train":train_accuracy,"test":test_accuracy}, epoch)
+
+writer.close()
+torch.save(net,"model.pth")
